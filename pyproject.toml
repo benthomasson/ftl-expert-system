@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ftl-expert-system"
+version = "0.1.0"
+description = "LLM-powered expert system with truth-maintained reasoning"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "ftl-reasons>=0.2.0",
+    "ftl-beliefs>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+expert = "ftl_expert_system.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
