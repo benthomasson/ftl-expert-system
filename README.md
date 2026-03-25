@@ -1,14 +1,10 @@
 # ftl-expert-system
 
-LLM-powered expert system with truth-maintained reasoning. Uses [ftl-reasons](https://github.com/benthomasson/ftl-reasons) (RMS) as the knowledge layer, with LLMs solving the knowledge acquisition bottleneck that killed expert systems in the 1980s.
+Library for building self-improving expert systems. Provides the fast-path/slow-path pattern, automatic belief extraction, and hit-rate tracking. Designed to be imported by [expert-service](https://github.com/benthomasson/expert-service) and similar applications.
 
-## What it does
+Uses [ftl-reasons](https://github.com/benthomasson/ftl-reasons) (RMS) for truth-maintained reasoning, with LLMs solving the knowledge acquisition bottleneck that killed expert systems in the 1980s.
 
-Traditional expert systems required knowledge engineers to manually extract and formalize domain expertise into production rules. This was expensive, slow, and didn't scale — the "knowledge acquisition bottleneck" that ultimately killed the field.
-
-ftl-expert-system inverts this: LLMs extract knowledge automatically from artifacts (code, docs, logs, state), feed it into a reason maintenance system, and serve it back as a fast path for future queries. The system improves through use — every novel question that requires LLM reasoning produces a new belief that makes the next similar question instant.
-
-**Architecture:**
+## Architecture
 
 ```
 Query arrives
@@ -16,7 +12,7 @@ Query arrives
     v
 +------------------+
 |  Fast path:      |--hit--> Return belief + justification chain
-|  grep beliefs.md |         (no LLM call, no cost, instant)
+|  search beliefs  |         (no LLM call, no cost, instant)
 +------------------+
     | miss
     v
@@ -27,14 +23,101 @@ Query arrives
     |
     v
 +------------------+
-|  Learn:          |--> Extract belief -> add to RMS -> export markdown
+|  Learn:          |--> Extract belief -> add to RMS
 |  Self-improve    |    (next time this hits the fast path)
 +------------------+
 ```
 
+The fast path gets faster over time. The slow path feeds the fast path. AI cost converges toward zero as the knowledge base grows.
+
+## Install
+
+```bash
+pip install ftl-expert-system
+```
+
+## What this library provides
+
+### 1. SelfImprovingAgent
+
+Wraps any LLM agent with fast-path-first routing and automatic belief extraction:
+
+```python
+from ftl_expert_system import ExpertSystem, Answer
+
+expert = ExpertSystem.load(expert_dir)
+answer = await expert.ask("Does the SSH layer validate host keys?")
+
+if answer.source == "fast_path":
+    # Answered from beliefs, no LLM call
+    print(f"Belief: {answer.belief_id}")
+else:
+    # LLM reasoned from scratch, new belief extracted for next time
+    print("Learned new belief")
+```
+
+### 2. Multi-expert parallel search
+
+Search multiple knowledge bases simultaneously. Grep is orders of magnitude cheaper than LLM inference, so searching 10 experts in parallel is still faster than a single LLM call:
+
+```python
+from ftl_expert_system import MultiExpertSearch
+
+search = MultiExpertSearch([expert_a, expert_b, expert_c])
+matches = search.search("host key verification")
+# Returns ranked results across all experts
+```
+
+### 3. FastPathMetrics
+
+Track hit rate to measure whether the expert system is self-improving:
+
+```python
+from ftl_expert_system import FastPathMetrics
+
+metrics = FastPathMetrics()
+# ... after each query ...
+print(f"Hit rate: {metrics.hit_rate:.1%}")
+print(f"Beliefs extracted: {metrics.beliefs_extracted}")
+```
+
+### 4. BeliefExtractor
+
+Extract structured beliefs from LLM answers:
+
+```python
+from ftl_expert_system import BeliefExtractor
+
+extractor = BeliefExtractor()
+belief = await extractor.extract(question, llm_answer)
+# {"id": "ssh-validates-host-keys", "text": "SSH layer validates host keys..."}
+```
+
+## Integration with expert-service
+
+expert-service already has multi-project knowledge bases, ftl-reasons RMS with PostgreSQL, 20 chat tools, meta-expert routing, and eval framework. This library adds the self-improving pattern:
+
+```python
+# In expert-service's chat agent setup:
+from ftl_expert_system import ExpertSystem
+
+# Wrap the existing agent with fast-path-first routing
+expert = ExpertSystem.load(project_dir)
+
+# Before calling the LLM agent, check beliefs
+matches = expert.search_beliefs(user_question)
+if matches:
+    return matches[0]  # Fast path, no LLM needed
+
+# Otherwise, let the agent reason, then extract a belief
+answer = await agent.invoke(user_question)
+belief = await expert.extract_belief(user_question, answer)
+expert.add_belief(belief)
+```
+
 ## Why not Drools / CLIPS / PyKE?
 
-Those are **production rule systems** (OPS5 lineage). This is a **truth maintenance system** (Doyle/de Kleer lineage). Different architectures for different problems.
+Those are **production rule systems** (OPS5 lineage). This is a **truth maintenance system** (Doyle/de Kleer lineage).
 
 | Capability | Drools/CLIPS/PyKE | ftl-expert-system |
 |---|---|---|
@@ -45,90 +128,11 @@ Those are **production rule systems** (OPS5 lineage). This is a **truth maintena
 | Self-improving from LLM | No | Yes |
 | Knowledge acquisition | Manual DSL | Automated via LLM |
 
-Production rule systems embed business logic in enterprise apps. This system enables LLM-powered knowledge acquisition with truth-maintained reasoning.
+Production rule systems embed business logic in enterprise apps. This library enables LLM-powered knowledge acquisition with truth-maintained reasoning.
 
-## Install
+## Self-improvement modes
 
-```bash
-pip install ftl-expert-system
-```
-
-Prerequisites:
-- [ftl-reasons](https://github.com/benthomasson/ftl-reasons) -- reason maintenance system
-- [ftl-beliefs](https://github.com/benthomasson/ftl-beliefs) -- belief registry (for markdown export)
-- `claude` CLI -- LLM inference (slow path)
-
-## Quick Start
-
-```bash
-# Initialize an expert system for a domain
-expert init ~/git/my-project --domain "Infrastructure automation"
-
-# Build knowledge: scan and explore (uses code-expert under the hood)
-expert scan
-expert explore
-
-# Query the expert system
-expert ask "Does the SSH layer validate host keys?"
-# -> Fast path: returns belief + justification if known
-# -> Slow path: LLM investigates, extracts belief, answers
-
-# Check what the system knows
-expert status
-```
-
-## Components
-
-### Knowledge Layer: ftl-reasons (RMS)
-
-The reason maintenance system tracks beliefs as nodes in a dependency network:
-
-- **Premises** -- directly observed facts ("known_hosts=None in ssh.py")
-- **Derived beliefs** -- logical consequences ("SSH layer is not production-hardened")
-- **Gated beliefs** -- positive claims held UNLESS a blocker is IN
-- **Retraction cascades** -- when a premise goes OUT, all dependents cascade
-- **Automatic restoration** -- when support returns, dependents restore without rederivation
-
-### Serving Layer: exported markdown
-
-Six ablation experiments showed LLMs perform 6-11pp better reading flat markdown than structured database results. The fast path serves `beliefs.md` (generated by `reasons export-markdown`), not raw RMS queries.
-
-The LLM reads rather than reasons -- the answer appears in context, surrounded by related beliefs, in natural prose. This is the fast path done right.
-
-### Inference: fast path / slow path
-
-```python
-async def ask(question: str, expert: ExpertSystem) -> Answer:
-    """Ask the expert system a question."""
-    # Fast path: check beliefs first
-    matches = expert.search_beliefs(question)
-    if matches:
-        return Answer(
-            text=matches[0].text,
-            justification=expert.explain(matches[0].id),
-            source="fast_path",
-        )
-
-    # Slow path: LLM reasons from sources
-    answer = await expert.llm_reason(question)
-
-    # Learn: extract belief for next time
-    belief = expert.extract_belief(question, answer)
-    expert.rms.add(belief)
-    expert.rms.export_markdown()
-
-    return Answer(
-        text=answer.text,
-        justification=answer.reasoning,
-        source="slow_path",
-    )
-```
-
-### Self-improvement
-
-Two modes, matching the two existing implementations:
-
-**Declarative (code-expert style):** LLM reads artifacts, extracts factual beliefs, adds to RMS with dependencies, derived beliefs computed automatically. Best for understanding domains.
+**Declarative (code-expert style):** LLM reads artifacts, extracts factual beliefs, adds to RMS with dependencies. Best for understanding domains.
 
 **Imperative (ftl2-ai-loop style):** LLM solves a problem, writes a deterministic rule, rule fires next time without LLM. Best for automation tasks.
 
@@ -138,11 +142,11 @@ Both feed the fast path. Both reduce AI cost over time toward zero.
 
 | Tool | Role |
 |------|------|
-| **ftl-expert-system** | Generalized expert system framework (this repo) |
+| **ftl-expert-system** | Self-improving expert system library (this repo) |
+| [expert-service](https://github.com/benthomasson/expert-service) | Web service that uses this library |
 | [ftl-reasons](https://github.com/benthomasson/ftl-reasons) | RMS -- dependency tracking, retraction cascades |
 | [ftl-beliefs](https://github.com/benthomasson/ftl-beliefs) | Belief registry -- provenance, staleness detection |
 | [code-expert](https://github.com/benthomasson/code-expert) | Deep code analysis -- scan, explore, extract, derive |
-| [entry](https://github.com/benthomasson/entry) | Chronological documentation |
 
 ## Prior Art
 
